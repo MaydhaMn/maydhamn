@@ -1,0 +1,311 @@
+import requests
+import datetime
+from urllib.parse import urlencode # needed to get the correct url syntax
+import base64
+
+#Provide client ID and client secret. You can get these from Spotify Dev
+client_id = ''
+client_secret = ''
+
+offset_tempo = 20
+    
+class SpotifyAPI(object):
+    access_token = None
+    access_token_expires = datetime.datetime.now() #expires as soon as it is created
+    access_token_did_expire = True
+    client_id = None
+    client_secret = None
+    token_url = 'https://accounts.spotify.com/api/token'
+    
+    def __init__(self, client_id, client_secret, *args, **kwargs):
+        
+        # not necessary, but good to do it in case we want to inherit anything
+        super().__init__(*args, **kwargs)
+        
+        self.client_id = client_id
+        self.client_secret = client_secret
+    
+    # We can do this inside the get_token_header method
+    # BUT, it is better to make separate methods because..
+    # ..it is cleaner and helps later with testing
+    def get_client_creds_b64(self):
+        """
+        Returns a base 64 encoded string
+        """
+        client_id = self.client_id
+        client_secret = self.client_secret
+        
+        if client_secret == None or client_id == None:
+            raise Exception("You must set client_id and client_secret")
+        
+        client_creds = f"{client_id}:{client_secret}" 
+        client_creds_b64 = base64.b64encode(client_creds.encode())
+        
+        return client_creds_b64.decode()
+        
+    
+    def get_token_headers(self):
+        
+        client_creds_b64 = self.get_client_creds_b64()
+        return {
+            
+            # we have to decode to turn this into a string
+            # otherwise there will be a byte type inside a string
+            # which is not what we want
+            'Authorization': f'Basic {client_creds_b64}'
+        }
+    
+    def get_token_data(self):
+        return {
+            'grant_type': 'client_credentials'
+        }
+        
+    def perform_auth(self):
+        
+        # Extract access token
+        # Then use it for authorization
+        
+        token_url = self.token_url
+        token_data = self.get_token_data()
+        token_headers = self.get_token_headers()
+        
+        r = requests.post(token_url, data=token_data, headers=token_headers)
+
+        if r.status_code not in range (200, 299):
+            raise Exception("Could not authenticate client")
+            return False
+            
+        data = r.json()
+        now = datetime.datetime.now()
+        access_token = data['access_token']
+        
+        self.access_token = access_token
+        
+        expires_in = data['expires_in'] #seconds
+        expires = now + datetime.timedelta(seconds=expires_in)
+        self.access_token_expires = expires
+        self.access_token_did_expire = expires < now
+
+        return True
+    
+    def get_access_token(self):
+            
+        token = self.access_token
+        expires = self.access_token_expires
+        
+        now = datetime.datetime.now()
+        
+        if (expires < now) or (token == None):
+            self.perform_auth()
+            return self.get_access_token()
+        
+        return token
+    
+    
+    def get_resource_headers(self):
+        access_token = self.get_access_token()
+        headers = {
+            "Authorization": f"Bearer {access_token}"
+        }
+        return headers
+        
+    
+    def get_resource(self, lookup_id, resource_type, version='v1'):
+        endpoint = f"https://api.spotify.com/{version}/{resource_type}/{lookup_id}"
+        headers = self.get_resource_headers()
+        r = requests.get(endpoint, headers=headers)
+        if r.status_code not in range(200,299):
+            return {}
+        return r.json()
+     
+    def get_album(self, _id):      
+        return self.get_resource(_id, resource_type='albums')
+    
+    def get_artist(self, _id):
+        return self.get_resource(_id, resource_type='artists')
+    
+    def get_track(self, _id):
+        return self.get_resource(_id, resource_type='tracks')
+    
+    def get_audio_analysis(self, _id):
+        return self.get_resource(_id, resource_type='audio-analysis')
+    
+    #def get_bpm(self, _id):
+    #    audio_data = self.get_audio_analysis(_id)
+        
+    def get_bpm(self, lookup_id):
+        
+        audio_data = self.get_audio_analysis(lookup_id) 
+        bpm = audio_data.get("track").get("tempo")
+        return bpm
+    
+    def get_key(self, lookup_id):
+        
+        audio_data = self.get_audio_analysis(lookup_id)
+        key = audio_data.get("track").get("key")
+        return key
+    
+    def get_mode(self, lookup_id):
+        
+        audio_data = self.get_audio_analysis(lookup_id)
+        mode = audio_data.get("track").get("mode")
+        return mode
+    
+    def get_key_confidence(self, lookup_id):
+        
+        audio_data = self.get_audio_analysis(lookup_id)
+        key_confidence = audio_data.get("track").get("key_confidence")
+        return key_confidence
+    
+    def get_mode_confidence(self, lookup_id):
+        
+        audio_data = self.get_audio_analysis(lookup_id)
+        mode_confidence = audio_data.get("track").get("mode_confidence")
+        return mode_confidence
+      
+    def base_search(self, query_params, search_type='artist'):
+        
+        access_token = self.get_access_token()
+        headers = self.get_resource_headers()
+
+        endpoint = "https://api.spotify.com/v1/search" 
+        
+        lookup_url = f"{endpoint}?{query_params}"
+        r = requests.get(lookup_url,headers=headers)
+    
+        
+        if r.status_code not in range(200,299):
+            return {}
+        
+        return r.json()
+    
+    def get_track_id(self, query_params):
+        song_data = self.base_search(query_params)
+        song_analysis_track = song_data.get("tracks")
+        song_analysis_id = song_analysis_track.get("items")
+        
+        # for now we just take the first item, later we use a for loop to get id's of all items and work with them
+        song_album = song_analysis_id.pop(0)
+        song_artist_id = song_album.get("id")
+
+        return song_artist_id
+    
+    def get_artist_id(self, query_params):
+        
+        #{'tracks': {'items': [{'album': {'artists': [{'id': '0LyfQWJT6nXafLPZqxe9Of',}]
+        
+        song_data = self.base_search(query_params)
+        song_track_value = song_data.get("tracks")
+        song_items_value = song_track_value.get("items")
+        
+        # for now we just take the first item, later we use a for loop to get id's of all items and work with them
+        song_items_item = song_items_value.pop(0)
+        song_album_value = song_items_item.get("album")
+        song_artists_value = song_album_value.get("artists")
+        song_artists_item = song_artists_value.pop(0)
+        song_id_value = song_artists_item.get("id")
+
+        return song_id_value
+        
+    def search(self, query=None, operator=None, operator_query=None, search_type='artist'):
+        
+        query = input("Search for a song: ")
+        
+        if query == None or query == "":
+            raise Exception("A query is required")
+            
+        if isinstance(query, dict):
+            query = " ".join([f"{k}:{v}" for k,v in query.items()])
+        
+        if operator != None and operator_query != None:
+            opertor = operator.upper()
+            if isinstance(operator_query, str):
+                query = f"{query} {operator} {operator_query}"
+            
+        #urlencode will turn the space into %20 as required
+        query_params = urlencode({"q": query, "type": search_type.lower()})
+        
+        #song_data = self.base_search(query_params)
+        song_id = self.get_artist_id(query_params)
+        
+        #return song_id
+        #return self.base_search(query_params)
+        
+        
+        lookup_id1 = self.get_track_id(query_params)
+        lookup_id2 = self.get_artist_id(query_params)
+        bpm = self.get_bpm(lookup_id1)
+        key = self.get_key(lookup_id1)
+        #mode = self.get_mode(track_id)
+        
+        key_confidence = self.get_key_confidence(lookup_id1)
+        mode_confidence = self.get_mode_confidence(lookup_id1)
+        
+        matching_songs = self.get_matching_songs(bpm,key,query_params)
+        
+        audio_analysis = self.get_audio_analysis(lookup_id1)
+        
+        return matching_songs
+        #return audio_analysis.json()
+    
+    #Given the bpm and key, find 5 songs that match this
+    
+    def get_matching_songs(self,bpm,key,query_params):
+        
+        min_tempo = bpm - offset_tempo
+        max_tempo = bpm + offset_tempo
+        min_key = key
+        max_key = key
+        
+        access_token = self.get_access_token()
+        headers = self.get_resource_headers()
+
+        endpoint = "https://api.spotify.com/v1/recommendations"
+        
+        track_id = self.get_track_id(query_params)
+        
+        mode = self.get_mode(track_id)
+        
+        key_conf = self.get_key_confidence(track_id)
+        mode_conf = self.get_mode_confidence(track_id)
+        
+        min_mode_conf = mode_conf - 0.4
+        
+        query_params = urlencode({"seed_tracks": track_id, "min_tempo": min_tempo, "max_tempo": max_tempo, "min_key": min_key, "max_key": max_key, "min_mode": mode, "max_mode": mode, "limit": 5})
+        
+        lookup_url = f"{endpoint}?{query_params}"
+        #lookup_url = "https://api.spotify.com/v1/recommendations?seed_artists=4NHQUGzhtTLFvgF5SZesLK&seed_tracks=0c6xIDDpzE81m2q797ordA&min_energy=0.4&min_popularity=50&market=US"
+        r = requests.get(lookup_url,headers=headers)
+    
+    
+        audio_analysis1 = self.get_audio_analysis(track_id)
+        audio_analysis2 = self.get_audio_analysis("6YUTL4dYpB9xZO5qExPf05")
+        
+        bpm_other1 = self.get_bpm("4Qj8u8NFQ9wGqtr4vdpJn3")
+        key_other1 = self.get_key("4Qj8u8NFQ9wGqtr4vdpJn3")
+        mode_other1 = self.get_mode("4Qj8u8NFQ9wGqtr4vdpJn3")
+        key_other1_conf = self.get_key_confidence("4Qj8u8NFQ9wGqtr4vdpJn3")
+        mode_other1_conf = self.get_mode_confidence("1bLNqR3bqpyWkwWKECjVrw")
+        
+        #print(audio_analysis1)
+        #print("--------xxxxx---------")
+        #print(audio_analysis2)
+       
+        print(f"bpm = {bpm}, key = {key}, mode = {mode}, mode_conf = {mode_conf}, key_conf = {key_conf}")
+              
+        #print("Leja Re:")
+        print(f"bpm = {bpm_other1}, key = {key_other1}, mode = {mode_other1}, mode_other_conf = {mode_other1_conf}, key_other_conf = {key_other1_conf}")
+   
+        
+        if r.status_code not in range(200,299):
+            return "not in range"
+        
+        return r.json()
+        
+        
+        
+spotify = SpotifyAPI(client_id, client_secret)
+#Sample search
+spotify.search(search_type="track")
+        
+        
